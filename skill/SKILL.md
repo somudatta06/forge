@@ -1,6 +1,6 @@
 ---
 name: forge
-version: 3.2.0
+version: 3.3.0
 description: |
   FORGE protocol — world-class multi-model agent swarm and prompt optimiser.
   Fable engineers a rubric-driven plan (true goal + success rubric + constraints +

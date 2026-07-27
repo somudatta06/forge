@@ -60,21 +60,31 @@ workflow/forge-swarm.js   the six step pipeline
 hooks/forge-inject.py     runs on every message and starts Forge
 hooks/forge-models.py     builds and refreshes the model config
 tests/logic_test.mjs      checks the scheduling, retry, and veto logic
+tests/cost_model.mjs      counts model calls per task shape to check the savings
 install.sh            copies everything into place
 ```
 
 ## Tests
 
-Two sets of checks run without calling any models:
+These checks run without calling any models:
 
 ```
 node tests/logic_test.mjs                      # scheduling, cycles, retry loop, veto
+node tests/cost_model.mjs                      # model-call count per task shape, old vs new
 python3 hooks/forge-models.py --selftest       # model classification, including future versions
 ```
 
+## Keeping costs down
+
+Forge spends effort in proportion to how hard the task is, so simple requests stay cheap.
+
+- Small requests take a lean path: it skips the plan review, uses one model per task instead of several, checks the work more lightly, and skips the final combine step when there is only one task and it passed. In tests this cuts the number of model calls for a simple task by about half.
+- The multi-model step (running the same task on several models and combining the answers) only runs on tasks the planner marks as high risk. Ordinary hard tasks use one strong model.
+- Reviews are scaled by risk. Tasks that need to be correct (calculations, reasoning) get more reviewers than tasks like writing text.
+- If you set a token budget for a run, Forge uses fewer reviewers and fewer models, and stops before it goes over.
+
 ## Notes
 
-- The hardest tasks cost more because they run on more than one model and get reviewed. Forge scales this down when a token budget is set for the run.
 - Every retry loop has a fixed limit, so a run always finishes.
 - Forge starts the model work through Claude Code's background workflow runner, so it keeps working while you do other things.
 
