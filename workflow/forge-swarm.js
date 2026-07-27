@@ -49,6 +49,7 @@ const rung       = (m) => { const i = cfg.ladder.indexOf(m); return i < 0 ? cfg.
 const escalate   = (m) => cfg.ladder[Math.min(cfg.ladder.length - 1, rung(m) + 1)] || m                  // repair routes UP the ladder
 const demote     = (m) => cfg.ladder[Math.max(0, rung(m) - 1)] || m                                       // self-heal routes DOWN
 const bigEffort  = (m) => (rung(m) >= rung(cfg.tiers.hard)) ? 'max' : 'high'
+const usesEnsemble = (t) => t.tier === 'hard' && t.highStakes === true   // opt-in ensemble; a plain hard unit uses one strong model
 // Self-healing agent call: if a model is unavailable (null result), retry once one rung DOWN the ladder.
 const ask = async (prompt, opts) => {
   let r = null
@@ -264,7 +265,7 @@ subtasks.forEach(t => { if (color[t.id] === undefined) dfs(t.id) })
 // MIXTURE-OF-AGENTS: the hardest units are attempted by DIVERSE frontier models in parallel
 // (Opus + Sonnet + Fable), then an aggregator cross-checks agreement and synthesizes the best
 // answer. More diverse than same-model self-consistency; agreement doubles as a confidence signal.
-const usesEnsemble = (t) => t.tier === 'hard' && t.highStakes === true   // opt-in: default hard unit uses one strong model
+// (usesEnsemble is defined up top with the other routing helpers.)
 const framingFor = (m) => ({
   haiku:  'Give a fast, direct first-pass answer.',
   sonnet: 'Reason efficiently and double-check each step against the acceptance criteria.',
