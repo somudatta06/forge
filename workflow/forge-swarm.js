@@ -408,7 +408,9 @@ return {
   refine: refineLog,
   stillOpen,
   mode: LEAN ? 'lean' : 'full',
-  tokensSpent: (() => { try { return B.spent() } catch (e) { return null } })(),
+  // Cumulative output tokens for the WHOLE session pool (shared across runs), not this run's cost.
+  // A single run's cost is reported in the run's own usage block (subagent_tokens).
+  sessionTokensCumulative: (() => { try { return B.spent() } catch (e) { return null } })(),
   modelRegistry: cfg,
   final,
 }
