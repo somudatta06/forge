@@ -1,6 +1,6 @@
 export const meta = {
   name: 'forge-swarm',
-  description: 'World-class multi-model swarm v3.1: Fable rubric-driven enhance → Opus plan-critique/repair → dataflow tier+kind routing (Mixture-of-Agents on hard units, real tools) → step-level rubric-scored voter panel w/ soundness veto → Reflexion iterative refine (escalating) → Fable rubric-graded synthesis. Budget-aware.',
+  description: 'Multi-model swarm v3.3: rubric-driven enhance, plan critique for multi-unit plans, dataflow tier+kind routing, Mixture-of-Agents only on high-stakes units, verification scaled by risk, Reflexion refine, rubric-graded synthesis. Spends effort in proportion to difficulty (lean path for simple tasks, full rigor for hard ones); budget-aware with hard stops.',
   whenToUse: 'Any substantive request routed through the FORGE protocol. Pass args:{prompt:"<raw user message>"}.',
   phases: [
     { title: 'Enhance', detail: 'Fable: true goal, success rubric, constraints, risks, minimal-sufficient MECE plan', model: 'fable' },
@@ -64,8 +64,15 @@ const B = (typeof budget !== 'undefined' && budget) ? budget : { total: null, re
 const remaining = () => { try { return B.remaining() } catch (e) { return Infinity } }
 const generous  = () => (B.total === null) || (remaining() > 300000)
 const canAfford = (n) => (B.total === null) || (remaining() > n)
-const votersFor = (tier) => {
-  const base = { trivial: 0, light: 0, medium: 2, hard: 3 }[tier] || 0
+// Verifier count scales with BOTH tier and kind: correctness-critical work (reasoning/
+// computation) gets the full panel; low-risk work (generation/retrieval) gets one light
+// check; cheap tiers get none. Squeezed further when a token budget is tight.
+const votersFor = (t) => {
+  const tier = (t && t.tier) ? t.tier : t          // accept a task object or a bare tier string
+  const kind = (t && t.kind) || ''
+  let base = { trivial: 0, light: 0, medium: 2, hard: 3 }[tier] || 0
+  if (base === 0) return 0
+  if (kind === 'generation' || kind === 'retrieval') base = 1   // low-risk kinds: one check is enough
   if (base > 1 && B.total !== null && remaining() < 120000) return 1   // budget-squeezed → single judge
   return base
 }
@@ -105,6 +112,7 @@ const PLAN_SCHEMA = {
           acceptanceCriteria: { type: 'string', description: 'What "done" means for THIS unit — how a judge scores it.' },
           dependsOn: { type: 'array', items: { type: 'string' } },
           needsExecution: { type: 'boolean' }, needsSearch: { type: 'boolean' },
+          highStakes: { type: 'boolean', description: 'true ONLY for a hard unit where being wrong is costly enough to justify running several models and picking the best.' },
         },
       },
     },
@@ -120,7 +128,7 @@ THE METHOD (apply every step, visibly):
 3. CONSTRAINTS & RISKS — explicit AND implicit constraints (format, audience, scope, non-goals) and the failure modes / common wrong answers to avoid.
 4. MINIMAL-SUFFICIENT MECE DECOMPOSITION — the fewest sub-tasks that FULLY cover the true goal, zero overlap, zero busywork. If simple, ONE sub-task is correct. CRITICAL FOR SPEED: set dependsOn ONLY for genuine data dependencies; independent units MUST stay independent so they run in parallel. Minimize the critical path.
 5. PRIOR ART / RECONNAISSANCE — for build/design/implement/research tasks, add an early unit (kind: retrieval, needsSearch: true, no deps) surveying the web + GitHub for existing tools/libraries/repos to reuse or learn from, feeding the build units. Never reinvent a battle-tested tool.
-6. REASONED ROUTING — per unit set: kind; tier by real difficulty (trivial/light→cheap, medium→mid, hard→top); acceptanceCriteria; needsExecution when truth requires running code; needsSearch when it requires current/external facts or prior art. Every sub-task prompt is fully self-contained with its own acceptance bar.
+6. REASONED ROUTING — per unit set: kind; tier by real difficulty (trivial/light→cheap, medium→mid, hard→top); acceptanceCriteria; needsExecution when truth requires running code; needsSearch when it requires current/external facts or prior art. Set highStakes:true ONLY for a hard unit where being wrong is costly enough to justify running several models and picking the best (most hard units do NOT need this). Every sub-task prompt is fully self-contained with its own acceptance bar.
 ${HONESTY}${extra || ''}
 
 RAW REQUEST:
@@ -128,10 +136,16 @@ RAW REQUEST:
 ${rawPrompt}
 """`
 
-let plan = await ask(ENHANCE_PROMPT(), { label: `${cfg.mind}:enhance`, phase: 'Enhance', model: cfg.mind, effort: 'max', schema: PLAN_SCHEMA })
+let plan = await ask(ENHANCE_PROMPT(), { label: `${cfg.mind}:enhance`, phase: 'Enhance', model: cfg.mind, effort: 'high', schema: PLAN_SCHEMA })
 if (!plan || !plan.subtasks || !plan.subtasks.length) {
   return { enhancedPrompt: plan && plan.enhancedPrompt, subtasks: [], final: '(enhancer produced no sub-tasks)' }
 }
+
+// Spend effort in proportion to difficulty. Small, easy plans take a lean path
+// (no plan-critique, no ensemble, lighter verification, no extra synthesis pass).
+const hasHard = plan.subtasks.some(t => t.tier === 'hard')
+const doCritique = plan.subtasks.length >= 2 && (plan.subtasks.length >= 3 || hasHard)   // critique checks ACROSS units; a 1-unit plan has nothing to optimise
+const LEAN = plan.subtasks.length <= 2 && !hasHard
 
 // ============================ PHASE 2 — CRITIQUE + REPAIR PLAN (optimiser) ============================
 phase('Critique')
@@ -149,30 +163,34 @@ const CRITIQUE_SCHEMA = {
   },
 }
 
-const critique = await agent(
-  `You are the PLAN CRITIC / OPTIMISER. Judge this plan against the true goal and rubric — do NOT solve the task. Check: (a) MECE — overlaps? gaps vs rubric? (b) MINIMALITY — busywork or mergeable units? (c) tiering/kind — over/under-powered units? (d) CRITICAL PATH — needless serialization parallelism could remove? Be specific and terse.
+let critique = null
+if (doCritique) {
+  critique = await agent(
+    `You are the PLAN CRITIC / OPTIMISER. Judge this plan against the true goal and rubric — do NOT solve the task. Check: (a) MECE — overlaps? gaps vs rubric? (b) MINIMALITY — busywork or mergeable units? (c) tiering/kind — over/under-powered units? (d) CRITICAL PATH — needless serialization parallelism could remove? Be specific and terse.
 
 TRUE GOAL: ${plan.trueGoal}
 SUCCESS RUBRIC:
 ${(plan.successCriteria || []).map((c, i) => `  ${i + 1}. ${c}`).join('\n')}
 SUB-TASKS:
 ${plan.subtasks.map(t => `- [${t.id}] (${t.tier}/${t.kind}) ${t.title} :: ${t.prompt}${(t.dependsOn && t.dependsOn.length) ? ' (deps: ' + t.dependsOn.join(',') + ')' : ''}`).join('\n')}`,
-  { label: `${cfg.planCritic}:plan-critic`, phase: 'Critique', model: cfg.planCritic, effort: 'high', schema: CRITIQUE_SCHEMA }
-)
-
-if (critique && critique.sound === false && critique.issues && critique.issues !== 'none') {
-  log(`Plan critic flagged issues → repairing plan. ${critique.issues}`)
-  const repaired = await ask(
-    ENHANCE_PROMPT(`\n\nA critic/optimiser reviewed your FIRST plan and found problems. Produce a corrected plan resolving ALL of them.\nCRITIC — overlaps: ${JSON.stringify(critique.overlaps || [])}; gaps: ${JSON.stringify(critique.gaps || [])}; busywork: ${JSON.stringify(critique.busywork || [])}; mistiered: ${JSON.stringify(critique.mistiered || [])}; serialization: ${critique.serialization || 'none'}; notes: ${critique.issues}`),
-    { label: `${cfg.mind}:plan-repair`, phase: 'Critique', model: cfg.mind, effort: 'max', schema: PLAN_SCHEMA }
+    { label: `${cfg.planCritic}:plan-critic`, phase: 'Critique', model: cfg.planCritic, effort: 'high', schema: CRITIQUE_SCHEMA }
   )
-  if (repaired && repaired.subtasks && repaired.subtasks.length) plan = repaired
+  if (critique && critique.sound === false && critique.issues && critique.issues !== 'none') {
+    log(`Plan critic flagged issues → repairing plan. ${critique.issues}`)
+    const repaired = await ask(
+      ENHANCE_PROMPT(`\n\nA critic/optimiser reviewed your FIRST plan and found problems. Produce a corrected plan resolving ALL of them.\nCRITIC — overlaps: ${JSON.stringify(critique.overlaps || [])}; gaps: ${JSON.stringify(critique.gaps || [])}; busywork: ${JSON.stringify(critique.busywork || [])}; mistiered: ${JSON.stringify(critique.mistiered || [])}; serialization: ${critique.serialization || 'none'}; notes: ${critique.issues}`),
+      { label: `${cfg.mind}:plan-repair`, phase: 'Critique', model: cfg.mind, effort: 'max', schema: PLAN_SCHEMA }
+    )
+    if (repaired && repaired.subtasks && repaired.subtasks.length) plan = repaired
+  } else {
+    log('Plan critic: sound.')
+  }
 } else {
-  log('Plan critic: sound.')
+  log('Small plan — skipping critique to save tokens.')
 }
 
 const subtasks = plan.subtasks
-log(`Plan ready. ${subtasks.length} units → ${subtasks.map(t => `${t.id}:${modelFor(t.tier)}/${t.kind}`).join(', ')}`)
+log(`Plan ready (${LEAN ? 'lean' : 'full'} mode). ${subtasks.length} units → ${subtasks.map(t => `${t.id}:${usesEnsemble(t) ? 'moa' : modelFor(t.tier)}/${t.kind}`).join(', ')}`)
 
 // ---------------- shared helpers ----------------
 const toolLine = (t) => {
@@ -203,7 +221,7 @@ const LENS_BRIEF = {
 // Verify a set of units with the perspective-diverse panel; soundness failure vetoes.
 const runVerify = async (items, tag) => {
   const jobs = []
-  items.forEach(t => { const n = votersFor(t.tier); for (let i = 0; i < n; i++) jobs.push({ t, lens: LENSES[i % LENSES.length] }) })
+  items.forEach(t => { const n = votersFor(t); for (let i = 0; i < n; i++) jobs.push({ t, lens: LENSES[i % LENSES.length] }) })
   const votes = (await parallel(jobs.map(j => () =>
     agent(
       `You are an adversarial verifier / judge. LENS = ${j.lens}. ${LENS_BRIEF[j.lens]}
@@ -246,7 +264,7 @@ subtasks.forEach(t => { if (color[t.id] === undefined) dfs(t.id) })
 // MIXTURE-OF-AGENTS: the hardest units are attempted by DIVERSE frontier models in parallel
 // (Opus + Sonnet + Fable), then an aggregator cross-checks agreement and synthesizes the best
 // answer. More diverse than same-model self-consistency; agreement doubles as a confidence signal.
-const usesEnsemble = (t) => t.tier === 'hard'
+const usesEnsemble = (t) => t.tier === 'hard' && t.highStakes === true   // opt-in: default hard unit uses one strong model
 const framingFor = (m) => ({
   haiku:  'Give a fast, direct first-pass answer.',
   sonnet: 'Reason efficiently and double-check each step against the acceptance criteria.',
@@ -289,7 +307,7 @@ await Promise.all(subtasks.map(t => launch(t)))
 
 // ============================ PHASE 4 — VERIFY ============================
 phase('Verify')
-const verifiable = subtasks.filter(t => (t.id in done) && votersFor(t.tier) > 0)
+const verifiable = subtasks.filter(t => (t.id in done) && votersFor(t) > 0)
 let { summary: verifySummary, failed } = await runVerify(verifiable, 'verify')
 
 // ============================ PHASE 5 — REFINE (Reflexion loop, escalating, bounded) ============================
@@ -345,7 +363,12 @@ const verifyNotes = verifySummary.length
 const rubric = (plan.successCriteria || []).map((c, i) => `  ${i + 1}. ${c}`).join('\n')
 const openTools = subtasks.filter(t => t.needsExecution || t.needsSearch).map(t => `- [${t.id}] ${t.title}${t.needsExecution ? ' (needs execution)' : ''}${t.needsSearch ? ' (needs search)' : ''}`)
 
-const final = await agent(
+let final
+if (subtasks.length === 1 && stillOpen.length === 0 && done[subtasks[0].id]) {
+  final = done[subtasks[0].id]
+  log('Single verified unit; returning its result directly (skipped a synthesis call).')
+} else {
+final = await ask(
   `You are the SYNTHESIZER, closing the loop on a world-class multi-model swarm. Produce the single best final answer to the user's ORIGINAL intent — direct, well-structured, complete. Integrate results that passed; for any STILL-OPEN unit, use the best available result but flag its known weakness honestly. ${HONESTY} Then GRADE your own answer against the success rubric and fix any unmet criterion before finalizing. If a criterion truly cannot be met, say so plainly.
 
 ORIGINAL REQUEST:
@@ -367,8 +390,9 @@ ${bundle}
 VERIFICATION LEDGER:
 ${verifyNotes}
 ${openTools.length ? '\nUNITS THAT REQUIRED TOOLS (ensure claims are real, else mark unverified):\n' + openTools.join('\n') : ''}`,
-  { label: `${cfg.mind}:synthesize`, phase: 'Synthesize', model: cfg.mind, effort: 'max' }
-)
+    { label: `${cfg.mind}:synthesize`, phase: 'Synthesize', model: cfg.mind, effort: (hasHard || stillOpen.length) ? 'max' : 'high' }
+  )
+}
 
 return {
   trueGoal: plan.trueGoal,
@@ -382,6 +406,7 @@ return {
   verification: verifySummary,
   refine: refineLog,
   stillOpen,
+  mode: LEAN ? 'lean' : 'full',
   tokensSpent: (() => { try { return B.spent() } catch (e) { return null } })(),
   modelRegistry: cfg,
   final,
